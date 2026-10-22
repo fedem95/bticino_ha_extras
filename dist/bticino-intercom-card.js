@@ -198,6 +198,39 @@ const DOMAIN_ICONS = {
   vacuum: 'mdi:robot-vacuum',
 };
 
+// Answering a ring, both sides have offered: the intercom in its incoming-call
+// push, the browser here, and the integration answers each offer with the
+// other's media. The browser then receives on the payload types of its own
+// offer, but a Classe 300 EOS sends H264 on 96, the number of its own offer,
+// whatever the answer says; Chrome offers VP8 on 96, so the video arrives on a
+// number it decodes as VP8 and stays black. Give 96 to H264 (packetization
+// mode 1, constrained baseline first) in the offer, swapping numbers with the
+// codec that held it.
+function moveH264To96(sdp) {
+  const lines = sdp.split('\r\n');
+  const start = lines.findIndex((line) => line.startsWith('m=video'));
+  if (start < 0) return sdp;
+  let end = lines.findIndex((line, i) => i > start && line.startsWith('m='));
+  if (end < 0) end = lines.length;
+  const section = lines.slice(start, end);
+  const fmtp = (pt) => section.find((line) => line.startsWith(`a=fmtp:${pt} `)) || '';
+  const h264 = section.map((line) => line.match(/^a=rtpmap:(\d+) H264\/90000$/i)?.[1]).filter(Boolean);
+  const mode1 = h264.filter((pt) => /packetization-mode=1/.test(fmtp(pt)));
+  const pick = mode1.find((pt) => /profile-level-id=42e01f/i.test(fmtp(pt))) || mode1[0];
+  if (!pick || pick === '96') return sdp;
+  const swap = (pt) => (pt === pick ? '96' : pt === '96' ? pick : pt);
+  const renumbered = section.map((line, i) => {
+    if (i === 0) {
+      const parts = line.split(' ');
+      return [...parts.slice(0, 3), ...parts.slice(3).map(swap)].join(' ');
+    }
+    return line
+      .replace(/^(a=(?:rtpmap|fmtp|rtcp-fb):)(\d+)/, (_, attr, pt) => attr + swap(pt))
+      .replace(/\bapt=(\d+)/, (_, pt) => `apt=${swap(pt)}`);
+  });
+  return [...lines.slice(0, start), ...renumbered, ...lines.slice(end)].join('\r\n');
+}
+
 const STATE = {
   IDLE: 'idle',
   CONNECTING: 'connecting',
@@ -768,6 +801,8 @@ class BticinoIntercomCard extends HTMLElement {
     this._ringSessionId = null;
     this._ringtoneAudio = null;
     this._ringData = null;
+    // Set while the next connection answers a ring (see moveH264To96).
+    this._answeringRing = false;
     this._savedActionBarHTML = null;
     this._missedCallTimer = null;
     this._lang = 'en';
@@ -1280,6 +1315,8 @@ class BticinoIntercomCard extends HTMLElement {
 
   async _startCall(target = 'external') {
     if (this._playing) return;
+    // Opening the live view while the intercom rings answers that ring too.
+    if (this._ringData) this._answeringRing = true;
     // Kept on the instance so a reconnect redials the same target.
     this._callTarget = this._activeIntercom?.call_home ? target : 'external';
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
@@ -1309,6 +1346,7 @@ class BticinoIntercomCard extends HTMLElement {
   _hangUp() {
     this._wantPlay = false;
     this._playing = false;
+    this._answeringRing = false;
     this._clearRingState();
     this._hideControls();
     this._cleanup();
@@ -1478,7 +1516,14 @@ class BticinoIntercomCard extends HTMLElement {
       };
 
       const offer = await this._pc.createOffer();
-      await this._pc.setLocalDescription(offer);
+      // Only the first connection of an answered ring: a reconnect after the
+      // ring is an ordinary live view, where the intercom follows our numbers.
+      if (this._answeringRing) {
+        this._answeringRing = false;
+        await this._pc.setLocalDescription({ type: 'offer', sdp: moveH264To96(offer.sdp) });
+      } else {
+        await this._pc.setLocalDescription(offer);
+      }
       await this._signalViaWebSocket(this._pc.localDescription.sdp);
     } catch (err) {
       console.error('[bticino-card] Connection failed:', err);
@@ -1925,6 +1970,7 @@ class BticinoIntercomCard extends HTMLElement {
     if (camIdx !== this._activeIndex) {
       this._switchIntercom(camIdx);
     }
+    this._answeringRing = true;
     setTimeout(() => this._startCall(), 500);
   }
 
@@ -1966,6 +2012,7 @@ class BticinoIntercomCard extends HTMLElement {
     this._restoreActionBar();
     this._updateTabStates();
     this._ringData = null;
+    this._answeringRing = true;
     // Keep ring-snapshot visible for crossfade — removed when video connects
     this._startCall();
   }
@@ -2612,6 +2659,8 @@ customElements.define('bticino-intercom-card-editor', BticinoIntercomCardEditor)
 // Registration
 // ---------------------------------------------------------------------------
 
+// Reachable from tests, which load this file as a plain module.
+BticinoIntercomCard.moveH264To96 = moveH264To96;
 customElements.define('bticino-intercom-card', BticinoIntercomCard);
 
 window.customCards = window.customCards || [];
