@@ -38,10 +38,10 @@ function cardWithHass() {
   return { card, calls };
 }
 
-test('taking the ring calls answer_call for the camera\'s config entry', async () => {
+test('taking the ring calls answer_call from the view for the camera\'s config entry', async () => {
   const { card, calls } = cardWithHass();
   card._takeRing();
-  assert.deepEqual(calls, [{ domain: 'bticino_intercom', service: 'answer_call', data: { entry_id: 'entry1' } }]);
+  assert.deepEqual(calls, [{ domain: 'bticino_intercom', service: 'answer_call', data: { entry_id: 'entry1', from_view: true } }]);
 });
 
 test('without a config entry nothing is called', () => {
