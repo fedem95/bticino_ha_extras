@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc6';
+const CARD_VERSION = '2026.10.1-rc7';
 // How long a card detached during a call waits to be put back on the page
 // (a layout change, such as rotating a phone) before it hangs up.
 const DETACH_GRACE_MS = 5000;
@@ -926,7 +926,18 @@ class BticinoIntercomCard extends HTMLElement {
   // the new elements instead of the idle screen.
   _restoreLiveView() {
     if (!this._playing) return;
+    // Open the video area at once: the opening animation, started while the
+    // page is being laid out again (a rotation), could stop half way on an
+    // iPhone and leave the area cut, hiding the call buttons at its bottom.
+    const wrapper = this.shadowRoot?.querySelector('.media-wrapper');
+    if (wrapper) wrapper.style.transition = 'none';
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
+    if (wrapper) {
+      void wrapper.offsetHeight; // apply the open state before animations come back
+      window.requestAnimationFrame(() => {
+        wrapper.style.transition = '';
+      });
+    }
     this.shadowRoot?.getElementById('idle-overlay')?.classList.add('hidden');
     this.shadowRoot?.getElementById('call-overlay')?.classList.add('hidden');
     const video = this.shadowRoot?.getElementById('video');
@@ -944,6 +955,7 @@ class BticinoIntercomCard extends HTMLElement {
     this._setState(this._state);
     if (this._micActive) this._updateMicUI();
     this._showControls();
+    this._hideControlsDelayed();
   }
 
   // ========== Rendering ==========
