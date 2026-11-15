@@ -1,6 +1,6 @@
 {
   "name": "bticino-ha-extras",
-  "version": "2026.10.1-rc7",
+  "version": "2026.10.1-rc8",
   "private": true,
   "type": "module",
   "scripts": {
