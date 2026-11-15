@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc1';
+const CARD_VERSION = '2026.10.1-rc2';
 
 // ---------------------------------------------------------------------------
 // i18n — covers all BTicino intercom markets
@@ -1347,6 +1347,7 @@ class BticinoIntercomCard extends HTMLElement {
     this._wantPlay = false;
     this._playing = false;
     this._answeringRing = false;
+    this._takeRingOnConnect = false;
     this._clearRingState();
     this._hideControls();
     this._cleanup();
@@ -1501,6 +1502,10 @@ class BticinoIntercomCard extends HTMLElement {
             snapshot.style.opacity = '0';
             setTimeout(() => snapshot.remove(), 500);
           }
+          if (this._takeRingOnConnect) {
+            this._takeRingOnConnect = false;
+            this._takeRing();
+          }
         } else if (['disconnected', 'failed', 'closed'].includes(state) && this._wantPlay) this._scheduleReconnect();
       };
 
@@ -1520,6 +1525,8 @@ class BticinoIntercomCard extends HTMLElement {
       // ring is an ordinary live view, where the intercom follows our numbers.
       if (this._answeringRing) {
         this._answeringRing = false;
+        // Once connected this view is the preview; take the call then (see onconnectionstatechange).
+        this._takeRingOnConnect = true;
         await this._pc.setLocalDescription({ type: 'offer', sdp: moveH264To96(offer.sdp) });
       } else {
         await this._pc.setLocalDescription(offer);
@@ -2015,6 +2022,18 @@ class BticinoIntercomCard extends HTMLElement {
     this._answeringRing = true;
     // Keep ring-snapshot visible for crossfade — removed when video connects
     this._startCall();
+  }
+
+  // The answered ring's media is up: this is still only the preview, and the
+  // indoor monitor keeps ringing. Like the app's green handset, answer_call
+  // sends the "player unmute" that takes the call (Classe 300 EOS; the
+  // integration does nothing when no call rings).
+  _takeRing() {
+    const entryId = this._getConfigEntryId();
+    if (!entryId || !this._hass) return;
+    this._hass.callService('bticino_intercom', 'answer_call', { entry_id: entryId }).catch((err) => {
+      console.warn('[bticino-card] answer_call failed:', err?.message || err);
+    });
   }
 
   _rejectIncomingCall() {
