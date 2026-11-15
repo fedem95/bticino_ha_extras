@@ -36,6 +36,7 @@ function card(attributes) {
     c._ringData = null;
   };
   c._collapseIfIdle = () => {};
+  c._ringScreenShown = () => !!c._ringData;
   c._hass = { states: { 'camera.door': { attributes } } };
   return { c, shown, cleared };
 }

@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc9';
+const CARD_VERSION = '2026.10.1-rc10';
 // How long a card detached during a call waits to be put back on the page
 // (a layout change, such as rotating a phone) before it hangs up.
 const DETACH_GRACE_MS = 5000;
@@ -848,7 +848,13 @@ class BticinoIntercomCard extends HTMLElement {
     const ringing = this._config.intercoms.find((ic) => this._hass.states[ic.camera]?.attributes?.incoming_call);
     if (ringing) {
       const session = this._hass.states[ringing.camera].attributes.incoming_call_session;
-      if (this._ringData || session === this._stateRingSession) return;
+      if (this._ringData) {
+        // Rebuilt while ringing (a card gets hass before it is on the page,
+        // and is drawn again when it is put there): show the ring screen again.
+        if (!this._ringScreenShown()) this._showRingOverlay(this._ringData);
+        return;
+      }
+      if (session === this._stateRingSession) return;
       this._stateRingSession = session;
       this._ringSessionId = session;
       this._showRingOverlay({
@@ -863,6 +869,10 @@ class BticinoIntercomCard extends HTMLElement {
       this._clearRingState();
       this._collapseIfIdle();
     }
+  }
+
+  _ringScreenShown() {
+    return !!this.shadowRoot?.querySelector('ha-card')?.classList.contains('ringing');
   }
 
   setConfig(config) {
@@ -919,6 +929,7 @@ class BticinoIntercomCard extends HTMLElement {
     }
     if (this._config && this._hass) this._render();
     this._subscribeCallEvents();
+    this._syncRingFromState();
     this._checkAutoAnswer();
   }
 
