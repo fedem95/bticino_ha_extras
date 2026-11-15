@@ -325,3 +325,84 @@ test('an offer still on its way when the call ends is released when it lands', a
 
   assert.equal(hass.subscriptions[0].unsubscribed, true);
 });
+
+// --- answering a ring (Classe 300 EOS) ---
+
+const H264_OFFER = [
+  'v=0',
+  'm=video 9 UDP/TLS/RTP/SAVPF 96 108',
+  'a=rtpmap:96 VP8/90000',
+  'a=rtpmap:108 H264/90000',
+  'a=fmtp:108 packetization-mode=1;profile-level-id=42e01f',
+  '',
+].join('\r\n');
+
+async function withChromeOffers(run) {
+  const original = globalThis.RTCPeerConnection;
+  globalThis.RTCPeerConnection = class extends FakePeerConnection {
+    async createOffer() {
+      return { type: 'offer', sdp: H264_OFFER };
+    }
+  };
+  try {
+    await run();
+  } finally {
+    globalThis.RTCPeerConnection = original;
+  }
+}
+
+test('a call answering a ring gives H264 the number 96 on its first offer only', async () => {
+  await withChromeOffers(async () => {
+    const hass = fakeHass();
+    const call = newCall(hass, { answersRing: true });
+    call.start();
+    await answer(hass, 'session-1');
+    assert.match(hass.subscriptions[0].message.offer, /a=rtpmap:96 H264\/90000/);
+
+    // a reconnect after the ring is an ordinary live view
+    call._reconnects = 1;
+    call._connect();
+    await answer(hass, 'session-2');
+    assert.equal(hass.subscriptions[1].message.offer, H264_OFFER);
+    call.stop();
+  });
+});
+
+test('an ordinary live view keeps the browser numbers', async () => {
+  await withChromeOffers(async () => {
+    const hass = fakeHass();
+    const call = newCall(hass);
+    call.start();
+    await answer(hass, 'session-1');
+    assert.equal(hass.subscriptions[0].message.offer, H264_OFFER);
+    call.stop();
+  });
+});
+
+test('a microphone that did not make it into the call is asked for again once connected', async () => {
+  const previous = microphone;
+  let asked = 0;
+  microphone = () => {
+    asked += 1;
+    // the first request, before the call, gives nothing (an iPhone without a tap)
+    return asked === 1 ? Promise.reject(new Error('NotAllowedError')) : previous();
+  };
+  try {
+    const hass = fakeHass();
+    const call = newCall(hass, { autoMic: true });
+    call.start();
+    await answer(hass, 'session-1');
+    assert.equal(call.micActive, false);
+    peers.at(-1).becomes('connected');
+    await until(() => call.micActive);
+    assert.equal(asked, 2);
+
+    // once per call: a reconnect does not ask again
+    peers.at(-1).becomes('connected');
+    await settle();
+    assert.equal(asked, 2);
+    call.stop();
+  } finally {
+    microphone = previous;
+  }
+});

@@ -46,6 +46,9 @@ import { BticinoCallSession, CALL_STATE } from './shared/webrtc.js';
 import { VERSION } from './shared/version.js';
 
 const CARD_VERSION = VERSION;
+// How long a card detached during a call waits to be put back on the page
+// (a layout change, such as rotating a phone) before it hangs up.
+const DETACH_GRACE_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // i18n — covers all BTicino intercom markets
@@ -778,6 +781,10 @@ class BticinoIntercomCard extends HTMLElement {
     this._ringingSensorCache = null;
     this._ignoredRings = new Map();
     this._answeredRingSessionId = null;
+    // Set while the next call answers a ring (BticinoCallSession answersRing).
+    this._answeringRing = false;
+    this._autoAnswering = false;
+    this._detachTimer = null;
     this._savedActionBarHTML = null;
     this._missedCallTimer = null;
     this._lang = 'en';
@@ -858,17 +865,69 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   connectedCallback() {
+    if (this._detachTimer) {
+      // Back on the page within the grace period (the dashboard moved the
+      // card, e.g. when the phone rotates): keep the call that is going on.
+      clearTimeout(this._detachTimer);
+      this._detachTimer = null;
+      if (this._config && this._hass) this._render();
+      this._restoreLiveView();
+      return;
+    }
     if (this._config && this._hass) this._render();
     this._subscribeCallEvents();
     this._checkAutoAnswer();
   }
 
   disconnectedCallback() {
+    if (this._playing) {
+      // The dashboard detaches and re-attaches cards when the layout changes
+      // (rotating an iPhone does it). Hanging up now would end an answered
+      // call; wait a moment for the card to come back.
+      clearTimeout(this._detachTimer);
+      this._detachTimer = setTimeout(() => {
+        this._detachTimer = null;
+        this._detach();
+      }, DETACH_GRACE_MS);
+      return;
+    }
+    this._detach();
+  }
+
+  _detach() {
     this._hangUp();
     this._ignoredRings.clear();
     this._lastSensorRing = null;
     this._unsubscribeCallEvents();
     document.removeEventListener('click', this._boundDocClick);
+  }
+
+  // The card was drawn again (_render) during a call: put the live view back
+  // on the new elements instead of the idle screen.
+  _restoreLiveView() {
+    if (!this._playing) return;
+    // Open the video area at once: the opening animation, started while the
+    // page is laid out again (a rotation), could stop half way on an iPhone.
+    const wrapper = this.shadowRoot?.querySelector('.media-wrapper');
+    if (wrapper) wrapper.style.transition = 'none';
+    this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
+    if (wrapper) {
+      void wrapper.offsetHeight; // apply the open state before animations come back
+      window.requestAnimationFrame(() => {
+        wrapper.style.transition = '';
+      });
+    }
+    this.shadowRoot?.getElementById('idle-overlay')?.classList.add('hidden');
+    this.shadowRoot?.getElementById('call-overlay')?.classList.add('hidden');
+    const video = this.shadowRoot?.getElementById('video');
+    if (video) video.muted = this._muted;
+    if (this._state !== STATE.LIVE) this.shadowRoot?.getElementById('connecting-overlay')?.classList.add('visible');
+    if (this._session) this._onCallState(this._session);
+    video?.play?.()?.catch?.(() => {});
+    this._updateMicUI();
+    this._setState(this._state);
+    this._showControls();
+    this._hideControlsDelayed();
   }
 
   // ========== Rendering ==========
@@ -1301,6 +1360,10 @@ class BticinoIntercomCard extends HTMLElement {
     if (this._playing) return;
     // Kept on the instance so a reconnect redials the same target.
     this._callTarget = this._activeIntercom?.call_home ? target : 'external';
+    // Opening the entrance while it rings answers that ring: from the ring
+    // screen, a notification's ?answer=, or the call button.
+    this._answeringRing = this._callTarget === 'external' && (this._autoAnswering || this._ringsNow());
+    this._autoAnswering = false;
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
     this._wantPlay = true;
     this._playing = true;
@@ -1314,9 +1377,18 @@ class BticinoIntercomCard extends HTMLElement {
     this._connect();
   }
 
+  /** Whether the active entrance rings now, as far as the card knows. */
+  _ringsNow() {
+    const camera = this._activeIntercom?.camera;
+    if (this._answeredRingSessionId || this._ringData?.camera_entity_id === camera) return true;
+    return this._ringingSensors().some((ring) => ring.camera === camera && ring.state.state === 'on');
+  }
+
   _hangUp() {
     this._ignoreCurrentRing();
     this._answeredRingSessionId = null;
+    this._answeringRing = false;
+    this._autoAnswering = false;
     this._wantPlay = false;
     this._playing = false;
     this._clearRingState();
@@ -1377,6 +1449,7 @@ class BticinoIntercomCard extends HTMLElement {
       wantsVideo: this._callWantsVideo,
       // this card asks for the microphone up front only when told to
       autoMic: !!this._config?.auto_mic,
+      answersRing: this._answeringRing,
       maxReconnects: this._maxRetries,
       onState: (session) => {
         if (this._session === session) this._onCallState(session);
@@ -1796,6 +1869,8 @@ class BticinoIntercomCard extends HTMLElement {
     if (camIdx !== this._activeIndex) {
       this._switchIntercom(camIdx);
     }
+    // A notification's answer: the ring may not have reached this card yet.
+    this._autoAnswering = true;
     setTimeout(() => this._startCall(), 500);
   }
 

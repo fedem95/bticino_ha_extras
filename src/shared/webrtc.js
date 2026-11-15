@@ -38,6 +38,41 @@ const SIGNALING_TIMEOUT = 15000;
 const RECONNECT_DELAY = 2000;
 const MAX_RECONNECTS = 3;
 
+/**
+ * Answering a ring, both sides have offered: the intercom in its incoming-call
+ * push, the browser here, and the integration answers each offer with the
+ * other's media. The browser then receives on the payload types of its own
+ * offer, but a Classe 300 EOS sends H264 on 96, the number of its own offer,
+ * whatever the answer says; Chrome offers VP8 on 96, so the video arrives on a
+ * number it decodes as VP8 and stays black. Give 96 to H264 (packetization
+ * mode 1, constrained baseline first) in the offer, swapping numbers with the
+ * codec that held it.
+ */
+export function moveH264To96(sdp) {
+  const lines = sdp.split('\r\n');
+  const start = lines.findIndex((line) => line.startsWith('m=video'));
+  if (start < 0) return sdp;
+  let end = lines.findIndex((line, i) => i > start && line.startsWith('m='));
+  if (end < 0) end = lines.length;
+  const section = lines.slice(start, end);
+  const fmtp = (pt) => section.find((line) => line.startsWith(`a=fmtp:${pt} `)) || '';
+  const h264 = section.map((line) => line.match(/^a=rtpmap:(\d+) H264\/90000$/i)?.[1]).filter(Boolean);
+  const mode1 = h264.filter((pt) => /packetization-mode=1/.test(fmtp(pt)));
+  const pick = mode1.find((pt) => /profile-level-id=42e01f/i.test(fmtp(pt))) || mode1[0];
+  if (!pick || pick === '96') return sdp;
+  const swap = (pt) => (pt === pick ? '96' : pt === '96' ? pick : pt);
+  const renumbered = section.map((line, i) => {
+    if (i === 0) {
+      const parts = line.split(' ');
+      return [...parts.slice(0, 3), ...parts.slice(3).map(swap)].join(' ');
+    }
+    return line
+      .replace(/^(a=(?:rtpmap|fmtp|rtcp-fb):)(\d+)/, (_, attr, pt) => attr + swap(pt))
+      .replace(/\bapt=(\d+)/, (_, pt) => `apt=${swap(pt)}`);
+  });
+  return [...lines.slice(0, start), ...renumbered, ...lines.slice(end)].join('\r\n');
+}
+
 /** Chromium is the only engine the device's firmware negotiates correctly. */
 export const isChromium = () => {
   const ua = navigator.userAgent;
@@ -47,10 +82,16 @@ export const isChromium = () => {
 };
 
 export class BticinoCallSession {
-  constructor(hass, { entityId, wantsVideo, autoMic = true, maxReconnects = MAX_RECONNECTS, onState, onNotice }) {
+  constructor(
+    hass,
+    { entityId, wantsVideo, autoMic = true, answersRing = false, maxReconnects = MAX_RECONNECTS, onState, onNotice },
+  ) {
     this.hass = hass;
     this.entityId = entityId;
     this.wantsVideo = !!wantsVideo;
+    // the first offer answers a ring (see moveH264To96); a reconnect after it
+    // is an ordinary live view, where the intercom follows our numbers
+    this._answersRing = !!answersRing;
     // asking for the microphone up front costs a prompt; a card whose own
     // option says not to can leave it to the button
     this.autoMic = autoMic !== false;
@@ -147,6 +188,14 @@ export class BticinoCallSession {
           this._reconnects = 0;
           this._reportConnected();
           this._set(CALL_STATE.LIVE);
+          // The microphone asked for up front may not have made it (an iPhone
+          // gives none to a call started without a tap, e.g. from a
+          // notification). Ask again now, as the microphone button does, which
+          // works there: without it the visitor hears nothing.
+          if (this.autoMic && !this.micActive && !this._micRetried && window.isSecureContext) {
+            this._micRetried = true;
+            this.setMic(true);
+          }
         } else if (this._wanted && ['disconnected', 'failed', 'closed'].includes(state)) {
           this._scheduleReconnect();
         }
@@ -162,8 +211,12 @@ export class BticinoCallSession {
         else this._pendingCandidates.push(candidate);
       };
 
-      const offer = await this._pc.createOffer();
+      let offer = await this._pc.createOffer();
       if (!this._current(attempt)) return;
+      if (this._answersRing) {
+        this._answersRing = false;
+        offer = { type: 'offer', sdp: moveH264To96(offer.sdp) };
+      }
       await this._pc.setLocalDescription(offer);
       if (!this._current(attempt)) return;
       await this._signal(this._pc.localDescription.sdp, attempt);
