@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc4';
+const CARD_VERSION = '2026.10.1-rc5';
 
 // ---------------------------------------------------------------------------
 // i18n — covers all BTicino intercom markets
@@ -1332,13 +1332,20 @@ class BticinoIntercomCard extends HTMLElement {
     }
 
     this._micError = null;
+    this._micLastError = null;
+    this._lateMic = null;
     this._diagnosticsSent = false;
     if (this._config.auto_mic && window.isSecureContext && navigator.mediaDevices?.getUserMedia) {
       try {
         this._micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const tracks = this._micStream?.getAudioTracks() || [];
+        this._autoMic = `ok:${tracks.length}:${tracks[0]?.readyState}`;
       } catch (err) {
         this._micError = err?.name || String(err);
+        this._autoMic = `error:${this._micError}`;
       }
+    } else {
+      this._autoMic = `skipped:auto_mic=${this._config.auto_mic},secure=${window.isSecureContext},gum=${!!navigator.mediaDevices?.getUserMedia}`;
     }
 
     this.shadowRoot?.getElementById('idle-overlay')?.classList.add('hidden');
@@ -1407,6 +1414,7 @@ class BticinoIntercomCard extends HTMLElement {
       this._micActive = true;
       this._updateMicUI();
     } catch (err) {
+      this._micLastError = err?.name || String(err);
       console.warn('[bticino-card] Mic access denied:', err);
     }
   }
@@ -1508,6 +1516,16 @@ class BticinoIntercomCard extends HTMLElement {
             snapshot.style.transition = 'opacity 0.5s ease';
             snapshot.style.opacity = '0';
             setTimeout(() => snapshot.remove(), 500);
+          }
+          // The microphone asked for at the start of the call may not have
+          // made it into the call (seen on iPhone: no error, no microphone).
+          // Start it now the way the microphone button does, which works
+          // there. Without it the phone sends little more than silence: the
+          // visitor hears nothing and the intercom is slow to take the call.
+          if (this._config.auto_mic && !this._micActive && window.isSecureContext) {
+            this._startMic().then(() => {
+              this._lateMic = this._micActive ? 'on' : 'failed';
+            });
           }
           if (this._takeRingOnConnect) {
             this._takeRingOnConnect = false;
@@ -2058,6 +2076,9 @@ class BticinoIntercomCard extends HTMLElement {
     const out = {
       secure: window.isSecureContext,
       mic: this._micActive ? 'on' : this._micError || (this._config.auto_mic ? 'not started' : 'auto_mic off'),
+      autoMic: this._autoMic,
+      lateMic: this._lateMic,
+      micLastError: this._micLastError,
       audioCtx: this._audioCtx?.state,
       videoMuted: video?.muted,
       videoPaused: video?.paused,
