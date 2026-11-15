@@ -42,7 +42,10 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc5';
+const CARD_VERSION = '2026.10.1-rc6';
+// How long a card detached during a call waits to be put back on the page
+// (a layout change, such as rotating a phone) before it hangs up.
+const DETACH_GRACE_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // i18n — covers all BTicino intercom markets
@@ -878,6 +881,15 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   connectedCallback() {
+    if (this._detachTimer) {
+      // Back on the page within the grace period (the dashboard moved the
+      // card, e.g. when the phone rotates): keep the call that is going on.
+      clearTimeout(this._detachTimer);
+      this._detachTimer = null;
+      if (this._config && this._hass) this._render();
+      this._restoreLiveView();
+      return;
+    }
     if (this._config && this._hass) this._render();
     this._subscribeCallEvents();
     this._checkAutoAnswer();
@@ -885,9 +897,53 @@ class BticinoIntercomCard extends HTMLElement {
 
   disconnectedCallback() {
     this._stopRingtone();
+    if (this._playing) {
+      // The dashboard detaches and re-attaches cards when the layout changes
+      // (rotating an iPhone does it). Closing the view now would hang up the
+      // call; wait a moment for the card to come back.
+      clearTimeout(this._detachTimer);
+      this._detachTimer = setTimeout(() => {
+        this._detachTimer = null;
+        this._detach();
+      }, DETACH_GRACE_MS);
+      return;
+    }
+    this._detach();
+  }
+
+  _detach() {
+    // Gone for good: no reconnect may reopen the view (it would answer the
+    // ring again) and the view's session is closed.
+    this._wantPlay = false;
+    this._playing = false;
+    this._takeRingOnConnect = false;
     this._cleanup();
     this._unsubscribeCallEvents();
     document.removeEventListener('click', this._boundDocClick);
+  }
+
+  // The card was rebuilt (_render) during a call: put the live view back on
+  // the new elements instead of the idle screen.
+  _restoreLiveView() {
+    if (!this._playing) return;
+    this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
+    this.shadowRoot?.getElementById('idle-overlay')?.classList.add('hidden');
+    this.shadowRoot?.getElementById('call-overlay')?.classList.add('hidden');
+    const video = this.shadowRoot?.getElementById('video');
+    if (video && this._remoteStream) {
+      video.srcObject = this._remoteStream;
+      video.muted = this._muted;
+      video.style.display = this._remoteStream.getVideoTracks().length ? 'block' : 'none';
+      video.play?.()?.catch?.(() => {});
+    }
+    if (this._state === STATE.LIVE) {
+      this.shadowRoot?.getElementById('connecting-overlay')?.classList.remove('visible');
+    } else {
+      this.shadowRoot?.getElementById('connecting-overlay')?.classList.add('visible');
+    }
+    this._setState(this._state);
+    if (this._micActive) this._updateMicUI();
+    this._showControls();
   }
 
   // ========== Rendering ==========
