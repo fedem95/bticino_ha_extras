@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc10';
+const CARD_VERSION = '2026.10.1-rc11';
 // How long a card detached during a call waits to be put back on the page
 // (a layout change, such as rotating a phone) before it hangs up.
 const DETACH_GRACE_MS = 5000;
@@ -1422,7 +1422,17 @@ class BticinoIntercomCard extends HTMLElement {
   async _startCall(target = 'external') {
     if (this._playing) return;
     // Opening the live view while the intercom rings answers that ring too.
-    if (this._ringData) this._answeringRing = true;
+    if (this._ringData) {
+      this._answeringRing = true;
+      // Started from elsewhere than the ring screen's answer button (the
+      // notification's ?answer=, the call button): the ring screen goes, as
+      // when answering from it, so the call shows its own buttons.
+      this.shadowRoot?.querySelector('ha-card')?.classList.remove('ringing');
+      this._stopRingtone();
+      this._restoreActionBar();
+      this._ringData = null;
+      this._updateTabStates();
+    }
     // Kept on the instance so a reconnect redials the same target.
     this._callTarget = this._activeIntercom?.call_home ? target : 'external';
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
