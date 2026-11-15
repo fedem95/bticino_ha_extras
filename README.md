@@ -117,6 +117,10 @@ intercoms:
 - **Incoming call** -- ringtone, snapshot preview, Answer/Open/Reject actions
 - **Quick actions** -- open doors, toggle lights while on a call
 
+**Answering a Classe 300 EOS ring** (needs the BTicino Intercom integration with call answering set up): open the external unit while it rings, tap *answer* on the ring screen, or open the card's view with `?answer=<camera entity>` in the URL (e.g. from a notification action). Opening the view is only the preview; once the media is connected the card calls `bticino_intercom.answer_call` (with `from_view: true`), which sends the app's "take the call" message: the indoor monitor stops ringing and the call counts as answered. The card also starts the microphone once connected, so the visitor hears you without touching the microphone button. Reloading the page ends the call.
+
+During a call, if the dashboard detaches and re-attaches the card (rotating a phone does it), the card keeps the call for up to 5 s instead of hanging up.
+
 ### Intercom Notification Blueprint
 
 1. Go to **Settings → Automations & Scenes → Blueprints**
@@ -144,7 +148,7 @@ When the doorbell rings:
 | HA Companion (Android) | Supported | Uses Chromium WebView |
 | Safari / iOS | Not supported | Device firmware limitation (hardcoded Chrome RTP payload types) |
 | Firefox | Not supported | Same device firmware limitation |
-| HA Companion (iOS) | Not supported | Uses WebKit (same as Safari) |
+| HA Companion (iOS) | Not supported | Uses WebKit (same as Safari). Exception: answering a Classe 300 EOS ring works, video and two-way audio (tested on iOS 18) |
 
 > [!IMPORTANT]
 > **Do NOT use AlexxIT's WebRTC integration** or other third-party WebRTC players to display the BTicino camera. They are not compatible with the BTicino signaling protocol and cause `InvalidStateError` crashes, especially on iOS/WebKit. This card is specifically designed for the BTicino intercom's WebRTC implementation.
