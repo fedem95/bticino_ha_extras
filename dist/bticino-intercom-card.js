@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc8';
+const CARD_VERSION = '2026.10.1-rc9';
 // How long a card detached during a call waits to be put back on the page
 // (a layout change, such as rotating a phone) before it hangs up.
 const DETACH_GRACE_MS = 5000;
@@ -836,6 +836,33 @@ class BticinoIntercomCard extends HTMLElement {
     if (!prev && hass && this._config) this._render();
     this._updateIdleOverlay();
     this._updateActionStates();
+    this._syncRingFromState();
+  }
+
+  // The ring event reaches only a card that is already open. A card opened
+  // while the unit rings learns it from the camera's incoming_call attribute
+  // (BTicino Intercom integration) and shows the ring screen; each ring once,
+  // so a dismissed or answered ring does not come back.
+  _syncRingFromState() {
+    if (!this._hass || !this._config || this._playing) return;
+    const ringing = this._config.intercoms.find((ic) => this._hass.states[ic.camera]?.attributes?.incoming_call);
+    if (ringing) {
+      const session = this._hass.states[ringing.camera].attributes.incoming_call_session;
+      if (this._ringData || session === this._stateRingSession) return;
+      this._stateRingSession = session;
+      this._ringSessionId = session;
+      this._showRingOverlay({
+        camera_entity_id: ringing.camera,
+        session_id: session,
+        module_name: ringing.name,
+        from_state: true,
+      });
+    } else if (this._ringData?.from_state) {
+      // Stopped ringing (taken elsewhere, missed): drop the ring screen.
+      this._ringSessionId = null;
+      this._clearRingState();
+      this._collapseIfIdle();
+    }
   }
 
   setConfig(config) {
