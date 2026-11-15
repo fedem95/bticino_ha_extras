@@ -42,7 +42,7 @@
  * @license MIT
  */
 
-const CARD_VERSION = '2026.10.1-rc3';
+const CARD_VERSION = '2026.10.1-rc4';
 
 // ---------------------------------------------------------------------------
 // i18n — covers all BTicino intercom markets
@@ -1331,10 +1331,14 @@ class BticinoIntercomCard extends HTMLElement {
       this._audioCtx = new AudioContext();
     }
 
+    this._micError = null;
+    this._diagnosticsSent = false;
     if (this._config.auto_mic && window.isSecureContext && navigator.mediaDevices?.getUserMedia) {
       try {
         this._micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch {}
+      } catch (err) {
+        this._micError = err?.name || String(err);
+      }
     }
 
     this.shadowRoot?.getElementById('idle-overlay')?.classList.add('hidden');
@@ -1508,6 +1512,10 @@ class BticinoIntercomCard extends HTMLElement {
           if (this._takeRingOnConnect) {
             this._takeRingOnConnect = false;
             this._takeRing();
+          }
+          if (!this._diagnosticsSent) {
+            this._diagnosticsSent = true;
+            setTimeout(() => this._reportAudioDiagnostics(), 6000);
           }
         } else if (['disconnected', 'failed', 'closed'].includes(state) && this._wantPlay) this._scheduleReconnect();
       };
@@ -2037,6 +2045,66 @@ class BticinoIntercomCard extends HTMLElement {
     this._hass.callService('bticino_intercom', 'answer_call', data).catch((err) => {
       console.warn('[bticino-card] answer_call failed:', err?.message || err);
     });
+  }
+
+  // TEMPORARY audio diagnostics: phones (iPhone in particular) have no console
+  // to read, so 6 s into each view the card writes one line to the Home
+  // Assistant log with what the audio is doing on this side: microphone,
+  // packets sent and received, levels, codecs, playback state.
+  async _reportAudioDiagnostics() {
+    const pc = this._pc;
+    if (!pc || !this._hass) return;
+    const video = this.shadowRoot?.getElementById('video');
+    const out = {
+      secure: window.isSecureContext,
+      mic: this._micActive ? 'on' : this._micError || (this._config.auto_mic ? 'not started' : 'auto_mic off'),
+      audioCtx: this._audioCtx?.state,
+      videoMuted: video?.muted,
+      videoPaused: video?.paused,
+      remoteTracks: this._remoteStream?.getTracks().map((t) => `${t.kind}:${t.readyState}:muted=${t.muted}`).join(','),
+    };
+    const sender = pc.getSenders().find((s) => s.track?.kind === 'audio');
+    out.sendTrack = sender?.track
+      ? `${sender.track.label || '?'}:${sender.track.readyState}:enabled=${sender.track.enabled}:muted=${sender.track.muted}`
+      : 'none';
+    out.transceivers = pc
+      .getTransceivers()
+      .map((t) => `${t.mid}:${t.receiver?.track?.kind}:${t.currentDirection}`)
+      .join(',');
+    try {
+      const stats = await pc.getStats();
+      const codecs = {};
+      stats.forEach((s) => {
+        if (s.type === 'codec') codecs[s.id] = `${s.mimeType}/${s.payloadType}`;
+      });
+      stats.forEach((s) => {
+        const kind = s.kind || s.mediaType;
+        if (s.type === 'outbound-rtp' && kind === 'audio') {
+          out.audioSent = s.packetsSent;
+          out.audioOutCodec = codecs[s.codecId];
+        } else if (s.type === 'inbound-rtp' && kind === 'audio') {
+          out.audioRecv = s.packetsReceived;
+          out.audioLevel = s.audioLevel;
+          out.audioEnergy = s.totalAudioEnergy;
+          out.audioInCodec = codecs[s.codecId];
+        } else if (s.type === 'inbound-rtp' && kind === 'video') {
+          out.videoRecv = s.packetsReceived;
+          out.videoInCodec = codecs[s.codecId];
+        } else if (s.type === 'media-source' && kind === 'audio') {
+          out.micLevel = s.audioLevel;
+        }
+      });
+    } catch (err) {
+      out.statsError = String(err);
+    }
+    out.ua = navigator.userAgent.slice(0, 120);
+    this._hass
+      .callService('system_log', 'write', {
+        message: `[bticino-card] audio diagnostics ${JSON.stringify(out)}`,
+        level: 'warning',
+        logger: 'bticino_card',
+      })
+      .catch(() => {});
   }
 
   _rejectIncomingCall() {
