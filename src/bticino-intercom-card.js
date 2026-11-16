@@ -1364,6 +1364,7 @@ class BticinoIntercomCard extends HTMLElement {
     // screen, a notification's ?answer=, or the call button.
     this._answeringRing = this._callTarget === 'external' && (this._autoAnswering || this._ringsNow());
     this._autoAnswering = false;
+    if (this._answeringRing) this._takeRing();
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
     this._wantPlay = true;
     this._playing = true;
@@ -1375,6 +1376,41 @@ class BticinoIntercomCard extends HTMLElement {
 
     this._setState(STATE.CONNECTING);
     this._connect();
+  }
+
+  /**
+   * This call answers the entrance's ring: the ring is taken, as when
+   * answering from the ring screen. Its screen goes, so the call shows its
+   * own buttons, and the ring's end later is the end of this call, not a
+   * missed one.
+   */
+  _takeRing() {
+    const camera = this._activeIntercom?.camera;
+    const rings = [];
+    if (this._ringData?.camera_entity_id === camera) rings.push(this._ringData);
+    if (this._lastSensorRing?.camera_entity_id === camera) rings.push(this._lastSensorRing);
+    for (const { state, camera: ringing } of this._ringingSensors()) {
+      if (ringing !== camera || state.state !== 'on') continue;
+      rings.push({
+        sensor_id: state.entity_id,
+        started: state.last_changed,
+        camera_entity_id: ringing,
+        ...state.attributes.ringing,
+      });
+    }
+    for (const ring of rings) {
+      if (!this._answeredRingSessionId && ring.session_id) this._answeredRingSessionId = ring.session_id;
+      if (ring.sensor_id) this._ignoredRings.set(ring.sensor_id, ring);
+    }
+    this._lastSensorRing = null;
+    if (this._ringData) {
+      // keep the ring snapshot: it fades out once the video is live
+      this.shadowRoot?.querySelector('ha-card')?.classList.remove('ringing');
+      this._stopRingtone();
+      this._restoreActionBar();
+      this._ringData = null;
+      this._updateTabStates();
+    }
   }
 
   /** Whether the active entrance rings now, as far as the card knows. */
@@ -1840,7 +1876,8 @@ class BticinoIntercomCard extends HTMLElement {
         this._ignoredRings.set(sensorRing.sensor_id, sensorRing);
         this._ringSessionId = null;
         this._clearRingState();
-        if (data.reason !== 'rescind') this._showMissedCall();
+        // answered elsewhere (rescind) or answered and hung up (hangup): not missed
+        if (!['rescind', 'hangup'].includes(data.reason)) this._showMissedCall();
         this._collapseIfIdle();
       } else if (data.session_id === this._ringSessionId && !this._ringData?.sensor_id) {
         const wasRinging = this.shadowRoot?.querySelector('ha-card')?.classList.contains('ringing');

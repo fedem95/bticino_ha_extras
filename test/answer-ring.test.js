@@ -31,7 +31,16 @@ function card({ sensorOn = false } = {}) {
   };
   instance._hass = {};
   instance._ringingSensors = () => [
-    { camera: 'camera.front', name: 'Front', state: { state: sensorOn ? 'on' : 'off', attributes: {} } },
+    {
+      camera: 'camera.front',
+      name: 'Front',
+      state: {
+        entity_id: 'binary_sensor.front_call',
+        state: sensorOn ? 'on' : 'off',
+        last_changed: '2026-11-16T20:37:50Z',
+        attributes: { ringing: sensorOn ? { session_id: 'ring-1' } : null },
+      },
+    },
   ];
   const offers = [];
   instance._connect = () => offers.push(instance._answeringRing);
@@ -73,4 +82,67 @@ test('another entrance ringing does not make this view an answer', () => {
   instance._activeIndex = 1;
   instance._startCall();
   assert.deepEqual(offers, [false]);
+});
+
+function endEvents(instance) {
+  const shown = { missed: 0, hungUp: 0 };
+  instance._showMissedCall = () => {
+    shown.missed += 1;
+  };
+  instance._clearRingState = () => {};
+  instance._collapseIfIdle = () => {};
+  const hangUp = instance._hangUp.bind(instance);
+  instance._hangUp = () => {
+    shown.hungUp += 1;
+    hangUp();
+  };
+  return shown;
+}
+
+test('a ring this card answered from a notification is not a missed call when it ends', () => {
+  const { instance } = card({ sensorOn: true });
+  // the ring screen came from the call sensor before ?answer= started the call
+  const ring = {
+    sensor_id: 'binary_sensor.front_call',
+    started: '2026-11-16T20:37:50Z',
+    camera_entity_id: 'camera.front',
+    session_id: 'ring-1',
+  };
+  instance._ringData = ring;
+  instance._lastSensorRing = ring;
+  instance._autoAnswering = true;
+  instance._startCall();
+  assert.equal(instance._answeredRingSessionId, 'ring-1');
+  assert.equal(instance._ringData, null, 'the ring screen goes when the call starts');
+  assert.ok(instance._ignoredRings.has('binary_sensor.front_call'));
+
+  const shown = endEvents(instance);
+  instance._handleCallEvent({ data: { type: 'end', session_id: 'ring-1', reason: 'hangup' } });
+  assert.equal(shown.missed, 0);
+});
+
+test('a ring answered elsewhere and hung up is not a missed call', () => {
+  const { instance } = card();
+  instance._lastSensorRing = {
+    sensor_id: 'binary_sensor.front_call',
+    started: '2026-11-16T20:40:12Z',
+    camera_entity_id: 'camera.front',
+    session_id: 'ring-2',
+  };
+  const shown = endEvents(instance);
+  instance._handleCallEvent({ data: { type: 'end', session_id: 'ring-2', reason: 'hangup' } });
+  assert.equal(shown.missed, 0);
+});
+
+test('a ring nobody answered is still a missed call', () => {
+  const { instance } = card();
+  instance._lastSensorRing = {
+    sensor_id: 'binary_sensor.front_call',
+    started: '2026-11-16T20:34:42Z',
+    camera_entity_id: 'camera.front',
+    session_id: 'ring-3',
+  };
+  const shown = endEvents(instance);
+  instance._handleCallEvent({ data: { type: 'end', session_id: 'ring-3', reason: 'timeout' } });
+  assert.equal(shown.missed, 1);
 });

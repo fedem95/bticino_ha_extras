@@ -35,6 +35,26 @@ const stopTracks = (stream) => {
 };
 
 const SIGNALING_TIMEOUT = 15000;
+// Browser promises that may never settle on an iPhone: a microphone request
+// and resuming an AudioContext outside a tap. The call goes on without them.
+export const TIMEOUTS = { mic: 8000, resume: 1500 };
+const TIMED_OUT = Symbol('timed out');
+const within = (promise, ms) => {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+/** Ask for the microphone, giving up after TIMEOUTS.mic; a late answer is let go. */
+async function requestMicrophone() {
+  const request = navigator.mediaDevices.getUserMedia({ audio: true });
+  const microphone = await within(request, TIMEOUTS.mic);
+  if (microphone !== TIMED_OUT) return microphone;
+  request.then(stopTracks, () => {});
+  return null;
+}
 const RECONNECT_DELAY = 2000;
 const MAX_RECONNECTS = 3;
 
@@ -128,7 +148,7 @@ export class BticinoCallSession {
     if (this.autoMic && window.isSecureContext && navigator.mediaDevices?.getUserMedia) {
       let microphone = null;
       try {
-        microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
+        microphone = await requestMicrophone();
       } catch {
         microphone = null;
       }
@@ -153,7 +173,9 @@ export class BticinoCallSession {
     this._micStream = keepMic;
 
     try {
-      if (this._audioCtx?.state === 'suspended') await this._audioCtx.resume();
+      // outside a tap an iPhone may never resume it; the silence it makes is
+      // only a stand-in until the microphone arrives
+      if (this._audioCtx?.state === 'suspended') await within(this._audioCtx.resume(), TIMEOUTS.resume);
       if (!this._current(attempt)) return;
       const oscillator = this._audioCtx.createOscillator();
       oscillator.frequency.value = 0;
@@ -188,13 +210,15 @@ export class BticinoCallSession {
           this._reconnects = 0;
           this._reportConnected();
           this._set(CALL_STATE.LIVE);
-          // The microphone asked for up front may not have made it (an iPhone
-          // gives none to a call started without a tap, e.g. from a
-          // notification). Ask again now, as the microphone button does, which
-          // works there: without it the visitor hears nothing.
-          if (this.autoMic && !this.micActive && !this._micRetried && window.isSecureContext) {
-            this._micRetried = true;
-            this.setMic(true);
+          // On an iPhone the microphone taken before the connection sends
+          // only silence (taken with a tap) or is not there at all (a call
+          // from a notification); one taken now and swapped in, as the
+          // microphone button does, carries the voice. The intercom takes
+          // an answered call only once it hears real audio. Once per
+          // connection, unless the user switched the microphone off.
+          if (this.autoMic && this._micWanted !== false && this._micTakenFor !== attempt && window.isSecureContext) {
+            this._micTakenFor = attempt;
+            this._takeMic(attempt);
           }
         } else if (this._wanted && ['disconnected', 'failed', 'closed'].includes(state)) {
           this._scheduleReconnect();
@@ -366,6 +390,8 @@ export class BticinoCallSession {
 
   /** Swap the silence the device needs for the real microphone, and back. */
   async setMic(on) {
+    // the user's choice: a microphone switched off stays off across reconnects
+    this._micWanted = on;
     if (on === this.micActive) return;
     if (!on) {
       if (this._micSender && this._silenceTrack) await this._micSender.replaceTrack(this._silenceTrack);
@@ -381,7 +407,7 @@ export class BticinoCallSession {
     const attempt = this._attempt;
     let microphone = null;
     try {
-      if (this._audioCtx?.state === 'suspended') await this._audioCtx.resume();
+      if (this._audioCtx?.state === 'suspended') await within(this._audioCtx.resume(), TIMEOUTS.resume);
       microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
       // hung up, or reconnected, while the browser was asking: this call has
       // no sender left to give the microphone to
@@ -403,6 +429,44 @@ export class BticinoCallSession {
       this.micActive = false;
       this.onNotice('mic_denied');
     }
+    this.onState(this);
+  }
+
+  /**
+   * Takes a fresh microphone once the connection is up and swaps it in for
+   * whatever the call sends (silence, or a microphone taken before), which is
+   * then let go. A microphone that cannot be had leaves the call as it was.
+   */
+  async _takeMic(attempt) {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    let microphone = null;
+    try {
+      microphone = await requestMicrophone();
+    } catch {
+      microphone = null;
+    }
+    const sender = this._current(attempt) ? this._pc?.getSenders()?.find((item) => item.track?.kind === 'audio') : null;
+    if (!microphone || !sender || this._micWanted === false) {
+      stopTracks(microphone);
+      // nothing to talk with, and nothing up front either: say so once
+      if (!microphone && sender && !this.micActive) this.onNotice('mic_denied');
+      return;
+    }
+    try {
+      await sender.replaceTrack(microphone.getAudioTracks()[0]);
+    } catch {
+      stopTracks(microphone);
+      return;
+    }
+    if (!this._current(attempt)) {
+      stopTracks(microphone);
+      return;
+    }
+    const previous = this._micStream;
+    this._micStream = microphone;
+    this._micSender = sender;
+    this.micActive = true;
+    if (previous && previous !== microphone) stopTracks(previous);
     this.onState(this);
   }
 

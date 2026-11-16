@@ -113,7 +113,7 @@ Object.defineProperty(globalThis, 'navigator', {
   value: { userAgent: 'Chrome/130', mediaDevices: { getUserMedia: () => microphone() } },
 });
 
-const { BticinoCallSession, CALL_STATE } = await import('../src/shared/webrtc.js');
+const { BticinoCallSession, CALL_STATE, TIMEOUTS } = await import('../src/shared/webrtc.js');
 
 function fakeHass({ connected = () => Promise.reject({ code: 'unknown_command', message: 'Unknown command.' }) } = {}) {
   const hass = {
@@ -397,12 +397,112 @@ test('a microphone that did not make it into the call is asked for again once co
     await until(() => call.micActive);
     assert.equal(asked, 2);
 
-    // once per call: a reconnect does not ask again
+    // once per connection: the same connection coming back does not ask again
     peers.at(-1).becomes('connected');
     await settle();
     assert.equal(asked, 2);
     call.stop();
   } finally {
     microphone = previous;
+  }
+});
+
+test('a microphone taken before the connection is replaced by a fresh one once connected', async () => {
+  // on an iPhone the one taken with the tap sends only silence
+  const previous = microphone;
+  const given = [];
+  microphone = () => {
+    const stream = new FakeStream([new FakeTrack('audio')]);
+    given.push(stream);
+    return Promise.resolve(stream);
+  };
+  try {
+    const hass = fakeHass();
+    const call = newCall(hass, { autoMic: true });
+    call.start();
+    await answer(hass, 'session-1');
+    assert.equal(call.micActive, true);
+    const sender = peers.at(-1).senders[0];
+    assert.equal(sender.track, given[0].tracks[0]);
+
+    peers.at(-1).becomes('connected');
+    await until(() => given.length === 2 && sender.track === given[1].tracks[0]);
+    assert.equal(given[0].tracks[0].stopped, true, 'the first microphone is let go');
+    assert.equal(given[1].tracks[0].stopped, false);
+
+    // a new connection takes one again
+    call._reconnects = 1;
+    call._connect();
+    await answer(hass, 'session-2');
+    peers.at(-1).becomes('connected');
+    await until(() => given.length === 3);
+    call.stop();
+  } finally {
+    microphone = previous;
+  }
+});
+
+test('a microphone switched off by the user is not taken again on connect', async () => {
+  const previous = microphone;
+  let asked = 0;
+  microphone = () => {
+    asked += 1;
+    return previous();
+  };
+  try {
+    const hass = fakeHass();
+    const call = newCall(hass, { autoMic: true });
+    call.start();
+    await answer(hass, 'session-1');
+    await call.setMic(false);
+    peers.at(-1).becomes('connected');
+    await settle();
+    assert.equal(asked, 1);
+    assert.equal(call.micActive, false);
+    call.stop();
+  } finally {
+    microphone = previous;
+  }
+});
+
+test('a microphone request that never answers does not hold the call back', async () => {
+  const previous = microphone;
+  const timeout = TIMEOUTS.mic;
+  TIMEOUTS.mic = 20;
+  microphone = () => new Promise(() => {});
+  try {
+    const hass = fakeHass();
+    const call = newCall(hass, { autoMic: true });
+    call.start();
+    await answer(hass, 'session-1');
+    assert.equal(hass.subscriptions.length, 1, 'the offer went out without the microphone');
+    assert.equal(call.micActive, false);
+    call.stop();
+  } finally {
+    microphone = previous;
+    TIMEOUTS.mic = timeout;
+  }
+});
+
+test('an AudioContext that never resumes does not hold the call back', async () => {
+  const Context = globalThis.AudioContext;
+  const timeout = TIMEOUTS.resume;
+  TIMEOUTS.resume = 20;
+  globalThis.AudioContext = class extends Context {
+    state = 'suspended';
+    resume() {
+      return new Promise(() => {});
+    }
+  };
+  try {
+    const hass = fakeHass();
+    const call = newCall(hass, { autoMic: false });
+    call.start();
+    await answer(hass, 'session-1');
+    assert.equal(hass.subscriptions.length, 1);
+    call.stop();
+  } finally {
+    globalThis.AudioContext = Context;
+    TIMEOUTS.resume = timeout;
   }
 });
