@@ -43,22 +43,84 @@ function card({ sensorOn = false } = {}) {
     },
   ];
   const offers = [];
-  instance._connect = () => offers.push(instance._answeringRing);
+  const answers = [];
+  instance._connect = () => {
+    offers.push(instance._answeringRing);
+    instance._session = { entityId: 'camera.front', answer: () => answers.push('answer'), stop: () => {} };
+  };
   instance._loadPosterBackground = () => {};
   instance._setState = () => {};
-  return { instance, offers };
+  return { instance, offers, answers };
 }
 
 test('a live view of an entrance that does not ring is not an answer', () => {
-  const { instance, offers } = card();
+  const { instance, offers, answers } = card();
   instance._startCall();
   assert.deepEqual(offers, [false]);
+  assert.deepEqual(answers, []);
 });
 
-test('the call button while the call sensor is on answers the ring', () => {
-  const { instance, offers } = card({ sensorOn: true });
+test('the call button while the entrance rings is a preview, not an answer', () => {
+  const { instance, offers, answers } = card({ sensorOn: true });
+  const ring = {
+    sensor_id: 'binary_sensor.front_call',
+    started: '2026-11-16T20:37:50Z',
+    camera_entity_id: 'camera.front',
+    session_id: 'ring-1',
+  };
+  instance._ringData = ring;
   instance._startCall();
+  // the view answers the ring's offer (H264 on 96), but the call is not taken
   assert.deepEqual(offers, [true]);
+  assert.deepEqual(answers, []);
+  assert.equal(instance._previewing, true);
+  assert.equal(instance._ringData, ring, 'the ring screen and its answer button stay');
+  assert.equal(instance._ignoredRings.size, 0);
+});
+
+test('answering on the ring screen during a preview takes the call on the same view', () => {
+  const { instance, offers, answers } = card({ sensorOn: true });
+  instance._ringData = { camera_entity_id: 'camera.front', session_id: 'ring-1' };
+  instance._startCall();
+  instance._answerIncomingCall();
+  assert.deepEqual(offers, [true], 'no second connection');
+  assert.deepEqual(answers, ['answer']);
+  assert.equal(instance._previewing, false);
+  assert.equal(instance._answeredRingSessionId, 'ring-1');
+});
+
+test('answering from the ring screen with no view open connects and takes the call', () => {
+  const { instance, offers, answers } = card({ sensorOn: true });
+  instance._ringData = { camera_entity_id: 'camera.front', session_id: 'ring-1' };
+  instance._answerIncomingCall();
+  assert.deepEqual(offers, [true]);
+  assert.deepEqual(answers, ['answer']);
+});
+
+test('rejecting during a preview closes the view', () => {
+  const { instance } = card({ sensorOn: true });
+  instance._ringData = { camera_entity_id: 'camera.front', session_id: 'ring-1' };
+  instance._getConfigEntryId = () => null;
+  instance._startCall();
+  let hungUp = 0;
+  const hangUp = instance._hangUp.bind(instance);
+  instance._hangUp = () => {
+    hungUp += 1;
+    hangUp();
+  };
+  instance._rejectIncomingCall();
+  assert.equal(hungUp, 1);
+  assert.equal(instance._playing, false);
+});
+
+test('a preview closes when the ring it shows ends', () => {
+  const { instance } = card({ sensorOn: true });
+  instance._ringData = { camera_entity_id: 'camera.front', session_id: 'ring-1' };
+  instance._startCall();
+  instance._showMissedCall = () => {};
+  instance._collapseIfIdle = () => {};
+  instance._handleCallEvent({ data: { type: 'end', session_id: 'ring-1', reason: 'timeout' } });
+  assert.equal(instance._playing, false);
 });
 
 test('the ring screen answer answers the ring', () => {
@@ -68,13 +130,14 @@ test('the ring screen answer answers the ring', () => {
   assert.deepEqual(offers, [true]);
 });
 
-test("a notification's answer counts, once", () => {
-  const { instance, offers } = card();
+test("a notification's answer takes the call, once", () => {
+  const { instance, offers, answers } = card();
   instance._autoAnswering = true;
   instance._startCall();
   instance._playing = false;
   instance._startCall();
   assert.deepEqual(offers, [true, false]);
+  assert.deepEqual(answers, ['answer']);
 });
 
 test('another entrance ringing does not make this view an answer', () => {

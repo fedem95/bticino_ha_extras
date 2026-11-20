@@ -210,6 +210,7 @@ export class BticinoCallSession {
           this._reconnects = 0;
           this._reportConnected();
           this._set(CALL_STATE.LIVE);
+          this._sendAnswer();
           // On an iPhone the microphone taken before the connection sends
           // only silence (taken with a tap) or is not there at all (a call
           // from a notification); one taken now and swapped in, as the
@@ -371,6 +372,31 @@ export class BticinoCallSession {
       .callWS({ type: `${DOMAIN}/webrtc_connected`, entity_id: this.entityId, session_id: this._sessionId })
       .catch((err) => {
         if (err?.code !== 'unknown_command') console.warn('[bticino] webrtc_connected:', err?.message || err);
+      });
+  }
+
+  /**
+   * The user answered: take the ring this view shows.
+   *
+   * Opening the camera while it rings is only a preview, as in the official
+   * app: the stream shows who is at the door and the call keeps ringing. An
+   * explicit answer (the ring screen's button, a notification's answer)
+   * asks the integration for the green handset's unmute, once the media is
+   * up and once per call: the unmute toggles, so a second one would mute
+   * the call again.
+   */
+  answer() {
+    this._answerWanted = true;
+    this._sendAnswer();
+  }
+
+  _sendAnswer() {
+    if (!this._answerWanted || this._answerSent || this.state !== CALL_STATE.LIVE || !this._sessionId) return;
+    this._answerSent = true;
+    this.hass
+      .callWS({ type: `${DOMAIN}/call/unmute`, entity_id: this.entityId, session_id: this._sessionId })
+      .catch((err) => {
+        if (err?.code !== 'unknown_command') console.warn('[bticino] call/unmute:', err?.message || err);
       });
   }
 

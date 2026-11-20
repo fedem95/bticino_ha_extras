@@ -784,6 +784,8 @@ class BticinoIntercomCard extends HTMLElement {
     // Set while the next call answers a ring (BticinoCallSession answersRing).
     this._answeringRing = false;
     this._autoAnswering = false;
+    // A view of the ringing entrance that has not answered (see _previewRing).
+    this._previewing = false;
     this._detachTimer = null;
     this._savedActionBarHTML = null;
     this._missedCallTimer = null;
@@ -1356,15 +1358,25 @@ class BticinoIntercomCard extends HTMLElement {
 
   // ========== Call / Hang Up ==========
 
-  _startCall(target = 'external') {
+  /**
+   * `answer` is the user's explicit answer to a ring (the ring screen's
+   * button, a notification's ?answer=). Without it, opening the entrance
+   * while it rings is a preview, as in the official app: the video shows
+   * who is at the door, the call keeps ringing, and the ring screen's
+   * answer button takes it.
+   */
+  _startCall(target = 'external', { answer = false } = {}) {
     if (this._playing) return;
     // Kept on the instance so a reconnect redials the same target.
     this._callTarget = this._activeIntercom?.call_home ? target : 'external';
-    // Opening the entrance while it rings answers that ring: from the ring
-    // screen, a notification's ?answer=, or the call button.
-    this._answeringRing = this._callTarget === 'external' && (this._autoAnswering || this._ringsNow());
+    const external = this._callTarget === 'external';
+    const explicit = external && (answer || this._autoAnswering);
     this._autoAnswering = false;
-    if (this._answeringRing) this._takeRing();
+    // Answering or previewing, the view answers the ring's offer (see
+    // BticinoCallSession answersRing).
+    this._answeringRing = explicit || (external && this._ringsNow());
+    if (explicit) this._takeRing();
+    else if (this._answeringRing) this._previewRing();
     this.shadowRoot?.querySelector('ha-card')?.classList.add('expanded');
     this._wantPlay = true;
     this._playing = true;
@@ -1376,6 +1388,17 @@ class BticinoIntercomCard extends HTMLElement {
 
     this._setState(STATE.CONNECTING);
     this._connect();
+    if (explicit) this._session?.answer();
+  }
+
+  /**
+   * A preview of the ringing entrance: the ring screen stays, with its
+   * answer, open and reject buttons, and the video replaces the still once
+   * it is live. Only this card's ringtone stops: someone is looking.
+   */
+  _previewRing() {
+    this._previewing = true;
+    this._stopRingtone();
   }
 
   /**
@@ -1425,6 +1448,7 @@ class BticinoIntercomCard extends HTMLElement {
     this._answeredRingSessionId = null;
     this._answeringRing = false;
     this._autoAnswering = false;
+    this._previewing = false;
     this._wantPlay = false;
     this._playing = false;
     this._clearRingState();
@@ -1520,7 +1544,8 @@ class BticinoIntercomCard extends HTMLElement {
 
     if (call.state === CALL_STATE.LIVE) {
       this._setState(STATE.LIVE);
-      if (!this._ringData) this._fadeRingSnapshot();
+      // a preview keeps the ring screen's buttons, but the video replaces the still
+      if (!this._ringData || this._previewing) this._fadeRingSnapshot();
     } else if (call.state === CALL_STATE.RECONNECTING) {
       this._setState(STATE.RECONNECTING);
     } else if (call.state === CALL_STATE.ERROR) {
@@ -1865,10 +1890,19 @@ class BticinoIntercomCard extends HTMLElement {
       this._ringSessionId = data.session_id;
       this._showRingOverlay(data);
     } else if (data.type === 'end') {
-      if (data.session_id && data.session_id === this._answeredRingSessionId && this._state === STATE.LIVE) {
+      const sensorRing = this._lastSensorRing;
+      // a preview of a ring that ended (missed, rejected, answered elsewhere)
+      // has nothing left to show
+      const previewEnded =
+        this._previewing &&
+        !!data.session_id &&
+        [this._ringSessionId, this._ringData?.session_id, sensorRing?.session_id].includes(data.session_id);
+      if (
+        (data.session_id && data.session_id === this._answeredRingSessionId && this._state === STATE.LIVE) ||
+        previewEnded
+      ) {
         this._hangUp();
       }
-      const sensorRing = this._lastSensorRing;
       if (data.session_id && data.session_id === sensorRing?.session_id) {
         // The state update may already have cleared the overlay. Remember the
         // unanswered ring until its end arrives, and consume it only once.
@@ -1958,14 +1992,23 @@ class BticinoIntercomCard extends HTMLElement {
     this._restoreActionBar();
     this._updateTabStates();
     this._ringData = null;
+    if (this._playing) {
+      // Already previewing this entrance: the view is on the ring, so
+      // answering only takes the call (the green handset).
+      this._previewing = false;
+      this._session?.answer();
+      return;
+    }
     // Keep ring-snapshot visible for crossfade — removed when video connects
-    this._startCall();
+    this._startCall('external', { answer: true });
   }
 
   _rejectIncomingCall() {
     const camera = this._ringData?.camera_entity_id;
+    const previewed = this._previewing && this._session?.entityId === camera;
     this._ignoreCurrentRing();
     this._clearRingState();
+    if (previewed) this._hangUp();
     this._collapseIfIdle();
     const entryId = this._getConfigEntryId(camera);
     if (entryId && this._hass) {
@@ -1994,6 +2037,14 @@ class BticinoIntercomCard extends HTMLElement {
 
     const videoArea = this.shadowRoot?.getElementById('video-area');
     if (!videoArea) return;
+
+    if (this._previewing && this._playing) {
+      // Someone is already looking at this ring: keep the video and its
+      // answer, open and reject buttons, without the still or the ringtone.
+      if (this._state === STATE.LIVE) videoArea.querySelector('.ring-snapshot')?.remove();
+      this._showRingActions();
+      return;
+    }
 
     videoArea.querySelector('.ring-snapshot')?.remove();
 

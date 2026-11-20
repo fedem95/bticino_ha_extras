@@ -125,7 +125,9 @@ intercoms:
 - **Incoming call** -- ringtone, snapshot preview, Answer/Open/Reject actions
 - **Quick actions** -- open doors, toggle lights while on a call
 
-**Answering a Classe 300 EOS ring** (needs the BTicino Intercom integration with call answering set up): open the external unit while it rings, tap *answer* on the ring screen, or open the card's view with `?answer=<camera entity>` in the URL (e.g. from a notification action). Opening the view is only the preview; once the media is connected the card reports it (`bticino_intercom/webrtc_connected`) and the integration sends the app's "take the call" message: the indoor monitor stops ringing and the call counts as answered. If the microphone asked for at the start did not make it into the call, the card asks for it again once connected, so the visitor hears you without touching the microphone button. Reloading the page ends the call.
+**Answering a Classe 300 EOS ring** (needs the BTicino Intercom integration with call answering set up): tap *answer* on the ring screen, or open the card's view with `?answer=<camera entity>` in the URL (e.g. from a notification action). Once the media is connected the card asks the integration to take the call (`bticino_intercom/call/unmute`, the app's green handset): the indoor monitor stops ringing and the call counts as answered. If the microphone asked for at the start did not make it into the call, the card asks for it again once connected, so the visitor hears you without touching the microphone button. Reloading the page ends the call.
+
+**Looking without answering:** opening the external unit while it rings (the call button) is a preview, as in the official app: the video shows who is at the door, the indoor monitor keeps ringing, and the ring screen keeps its answer, open and reject buttons; *answer* then takes the call on the same view, *reject* or the end of the ring closes it. As with the app's preview, the official app stops ringing on the other phones.
 
 During a call, if the dashboard detaches and re-attaches the card (rotating a phone does it), the card keeps the call for up to 5 s instead of hanging up.
 

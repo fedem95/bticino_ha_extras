@@ -506,3 +506,53 @@ test('an AudioContext that never resumes does not hold the call back', async () 
     TIMEOUTS.resume = timeout;
   }
 });
+
+// --- an explicit answer takes the call; a view alone is a preview ---
+
+const unmutes = (hass) => hass.sent.filter((message) => message.type === 'bticino_intercom/call/unmute');
+
+test('a connected view only previews: no unmute without an answer', async () => {
+  const hass = fakeHass({ connected: () => Promise.resolve(null) });
+  const call = newCall(hass, { autoMic: false, answersRing: true });
+  call.start();
+  await answer(hass, 'session-1');
+  peers.at(-1).becomes('connected');
+  await settle();
+  assert.equal(reports(hass).length, 1);
+  assert.deepEqual(unmutes(hass), []);
+  call.stop();
+});
+
+test('an answer given while connecting is sent once the media is up, once', async () => {
+  const hass = fakeHass({ connected: () => Promise.resolve(null) });
+  const call = newCall(hass, { autoMic: false, answersRing: true });
+  call.start();
+  call.answer();
+  await answer(hass, 'session-1');
+  assert.deepEqual(unmutes(hass), [], 'not before the media is up');
+  peers.at(-1).becomes('connected');
+  await settle();
+  assert.deepEqual(unmutes(hass), [
+    { type: 'bticino_intercom/call/unmute', entity_id: 'camera.front_door', session_id: 'session-1' },
+  ]);
+
+  // the same connection coming back, or a second tap, sends no second toggle
+  peers.at(-1).becomes('connected');
+  call.answer();
+  await settle();
+  assert.equal(unmutes(hass).length, 1);
+  call.stop();
+});
+
+test('an answer during a live preview is sent at once', async () => {
+  const hass = fakeHass({ connected: () => Promise.resolve(null) });
+  const call = newCall(hass, { autoMic: false, answersRing: true });
+  call.start();
+  await answer(hass, 'session-1');
+  peers.at(-1).becomes('connected');
+  await settle();
+  call.answer();
+  await settle();
+  assert.equal(unmutes(hass).length, 1);
+  call.stop();
+});
